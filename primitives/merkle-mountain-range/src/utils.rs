@@ -126,6 +126,17 @@ impl NodesUtils {
 		(prefix, pos, parent_hash).encode()
 	}
 
+	/// Build offchain key from `parent_hash` of block that originally added node `pos` to MMR.
+	///
+	/// This combination makes the offchain (key,value) entry resilient to chain forks.
+	pub fn node_ext_temp_offchain_key<H: Header>(
+		prefix: &[u8],
+		block_num: H::Number,
+		parent_hash: H::Hash,
+	) -> Vec<u8> {
+		(prefix, block_num, parent_hash).encode()
+	}
+
 	/// Build canonical offchain key for node `pos` in MMR.
 	///
 	/// Used for nodes added by now finalized blocks.
@@ -133,6 +144,18 @@ impl NodesUtils {
 	/// there's no `node_offchain_key` key in the storage.
 	pub fn node_canon_offchain_key(prefix: &[u8], pos: NodeIndex) -> sp_std::prelude::Vec<u8> {
 		(prefix, pos).encode()
+	}
+
+	/// Build canonical offchain key for node `pos` in MMR.
+	///
+	/// Used for nodes added by now finalized blocks.
+	/// Never read keys using `node_canon_offchain_key` unless you sure that
+	/// there's no `node_offchain_key` key in the storage.
+	pub fn node_ext_canon_offchain_key<H: Header>(
+		prefix: &[u8],
+		block_num: H::Number,
+	) -> sp_std::prelude::Vec<u8> {
+		(prefix, block_num).encode()
 	}
 }
 

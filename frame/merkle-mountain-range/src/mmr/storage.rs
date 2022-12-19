@@ -21,7 +21,8 @@ use codec::Encode;
 use frame_support::log::{debug, trace};
 use sp_core::offchain::StorageKind;
 use sp_io::offchain_index;
-use sp_mmr_primitives::{mmr_lib, mmr_lib::helper, utils::NodesUtils};
+use sp_mmr_primitives::{mmr_lib, mmr_lib::helper, utils::NodesUtils, MmrLeafSubtree};
+use sp_runtime::traits::{One, Saturating};
 use sp_std::iter::Peekable;
 #[cfg(not(feature = "std"))]
 use sp_std::prelude::*;
@@ -60,14 +61,6 @@ impl<StorageType, T, I, L> Default for Storage<StorageType, T, I, L> {
 	}
 }
 
-impl<T, I, L> Storage<OffchainStorage, T, I, L>
-where
-	T: Config<I>,
-	I: 'static,
-	L: primitives::FullLeaf,
-{
-}
-
 impl<T, I, L> mmr_lib::MMRStore<NodeOf<T, I, L>> for Storage<OffchainStorage, T, I, L>
 where
 	T: Config<I>,
@@ -76,35 +69,45 @@ where
 {
 	fn get_elem(&self, pos: NodeIndex) -> mmr_lib::Result<Option<NodeOf<T, I, L>>> {
 		let leaves = NumberOfLeaves::<T, I>::get();
-		// Find out which leaf added node `pos` in the MMR.
+		// Find out which leaf and which block added node `pos` in the MMR.
 		let ancestor_leaf_idx = NodesUtils::leaf_index_that_added_node(pos);
+		let ancestor_parent_block_num =
+			Pallet::<T, I>::leaf_index_to_parent_block_num(ancestor_leaf_idx, leaves);
+		let ancestor_block_num = ancestor_parent_block_num.saturating_add(One::one());
 
 		// We should only get here when trying to generate proofs. The client requests
 		// for proofs for finalized blocks, which should usually be already canonicalized,
 		// unless the MMR client gadget has a delay.
-		let key = Pallet::<T, I>::node_canon_offchain_key(pos);
+		let key = Pallet::<T, I>::node_ext_canon_offchain_key(ancestor_block_num);
 		debug!(
 			target: "runtime::mmr::offchain", "offchain db get {}: leaf idx {:?}, canon key {:?}",
 			pos, ancestor_leaf_idx, key
 		);
 		// Try to retrieve the element from Off-chain DB.
-		if let Some(elem) = sp_io::offchain::local_storage_get(StorageKind::PERSISTENT, &key) {
-			return Ok(codec::Decode::decode(&mut &*elem).ok())
+		if let Some(encoded_subtree) =
+			sp_io::offchain::local_storage_get(StorageKind::PERSISTENT, &key)
+		{
+			let maybe_subtree: Option<MmrLeafSubtree<NodeOf<T, I, L>>> =
+				codec::Decode::decode(&mut &*encoded_subtree).ok();
+			if let Some(subtree) = maybe_subtree {
+				return Ok(subtree.get(pos).cloned())
+			}
 		}
 
 		// Fall through to searching node using fork-specific key.
-		let ancestor_parent_block_num =
-			Pallet::<T, I>::leaf_index_to_parent_block_num(ancestor_leaf_idx, leaves);
 		let ancestor_parent_hash = <frame_system::Pallet<T>>::block_hash(ancestor_parent_block_num);
-		let temp_key = Pallet::<T, I>::node_temp_offchain_key(pos, ancestor_parent_hash);
+		let temp_key =
+			Pallet::<T, I>::node_ext_temp_offchain_key(ancestor_block_num, ancestor_parent_hash);
 		debug!(
 			target: "runtime::mmr::offchain",
 			"offchain db get {}: leaf idx {:?}, hash {:?}, temp key {:?}",
 			pos, ancestor_leaf_idx, ancestor_parent_hash, temp_key
 		);
 		// Retrieve the element from Off-chain DB.
-		Ok(sp_io::offchain::local_storage_get(StorageKind::PERSISTENT, &temp_key)
-			.and_then(|v| codec::Decode::decode(&mut &*v).ok()))
+		let subtree: Option<MmrLeafSubtree<NodeOf<T, I, L>>> =
+			sp_io::offchain::local_storage_get(StorageKind::PERSISTENT, &temp_key)
+				.and_then(|v| codec::Decode::decode(&mut &*v).ok());
+		Ok(subtree.and_then(|subtree| subtree.get(pos).cloned()))
 	}
 
 	fn append(&mut self, _: NodeIndex, _: Vec<NodeOf<T, I, L>>) -> mmr_lib::Result<()> {
@@ -122,7 +125,7 @@ where
 		Ok(<Nodes<T, I>>::get(pos).map(Node::Hash))
 	}
 
-	fn append(&mut self, pos: NodeIndex, elems: Vec<NodeOf<T, I, L>>) -> mmr_lib::Result<()> {
+	fn append(&mut self, pos: NodeIndex, mut elems: Vec<NodeOf<T, I, L>>) -> mmr_lib::Result<()> {
 		if elems.is_empty() {
 			return Ok(())
 		}
@@ -146,29 +149,34 @@ where
 
 		// Now we are going to iterate over elements to insert
 		// and keep track of the current `node_index` and `leaf_index`.
-		let mut leaf_index = leaves;
+		let leaf_index = leaves;
 		let mut node_index = size;
+		let block_num = Pallet::<T, I>::leaf_index_to_parent_block_num(leaf_index, leaves);
 
 		// Use parent hash of block adding new nodes (this block) as extra identifier
 		// in offchain DB to avoid DB collisions and overwrites in case of forks.
 		let parent_hash = <frame_system::Pallet<T>>::parent_hash();
-		for elem in elems {
+		let mut mmr_subtree = MmrLeafSubtree::<NodeOf<T, I, L>>::new(node_index);
+		for elem in elems.drain(..) {
 			// On-chain we are going to only store new peaks.
 			if peaks_to_store.next_if_eq(&node_index).is_some() {
 				<Nodes<T, I>>::insert(node_index, elem.hash());
 			}
+
 			// We are storing full node off-chain (using indexing API).
-			Self::store_to_offchain(node_index, parent_hash, &elem);
+			mmr_subtree.push(elem);
 
 			// Increase the indices.
-			if let Node::Data(..) = elem {
-				leaf_index += 1;
-			}
 			node_index += 1;
 		}
 
+		// write the subtree to offchain
+		let temp_key = Pallet::<T, I>::node_ext_temp_offchain_key(block_num, parent_hash);
+		let encoded_subtree = mmr_subtree.encode();
+		offchain_index::set(&temp_key, &encoded_subtree);
+
 		// Update current number of leaves.
-		NumberOfLeaves::<T, I>::put(leaf_index);
+		NumberOfLeaves::<T, I>::put(leaves + 1);
 
 		// And remove all remaining items from `peaks_before` collection.
 		for pos in peaks_to_prune {
@@ -176,31 +184,6 @@ where
 		}
 
 		Ok(())
-	}
-}
-
-impl<T, I, L> Storage<RuntimeStorage, T, I, L>
-where
-	T: Config<I>,
-	I: 'static,
-	L: primitives::FullLeaf,
-{
-	fn store_to_offchain(
-		pos: NodeIndex,
-		parent_hash: <T as frame_system::Config>::Hash,
-		node: &NodeOf<T, I, L>,
-	) {
-		let encoded_node = node.encode();
-		// We store this leaf offchain keyed by `(parent_hash, node_index)` to make it
-		// fork-resistant. The MMR client gadget task will "canonicalize" it on the first
-		// finality notification that follows, when we are not worried about forks anymore.
-		let temp_key = Pallet::<T, I>::node_temp_offchain_key(pos, parent_hash);
-		debug!(
-			target: "runtime::mmr::offchain", "offchain db set: pos {} parent_hash {:?} key {:?}",
-			pos, parent_hash, temp_key
-		);
-		// Indexing API is used to store the full node content.
-		offchain_index::set(&temp_key, &encoded_node);
 	}
 }
 

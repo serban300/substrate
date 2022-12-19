@@ -290,13 +290,30 @@ impl<T: Config<I>, I: 'static> Pallet<T, I> {
 		)
 	}
 
+	/// Build offchain key from `parent_hash` of block that originally added node `pos` to MMR.
+	///
+	/// This combination makes the offchain (key,value) entry resilient to chain forks.
+	fn node_ext_temp_offchain_key(
+		block_num: T::BlockNumber,
+		parent_hash: <T as frame_system::Config>::Hash,
+	) -> sp_std::prelude::Vec<u8> {
+		NodesUtils::node_ext_temp_offchain_key::<<T as frame_system::Config>::Header>(
+			&T::INDEXING_PREFIX,
+			block_num,
+			parent_hash,
+		)
+	}
+
 	/// Build canonical offchain key for node `pos` in MMR.
 	///
 	/// Used for nodes added by now finalized blocks.
 	/// Never read keys using `node_canon_offchain_key` unless you sure that
 	/// there's no `node_offchain_key` key in the storage.
-	fn node_canon_offchain_key(pos: NodeIndex) -> sp_std::prelude::Vec<u8> {
-		NodesUtils::node_canon_offchain_key(&T::INDEXING_PREFIX, pos)
+	fn node_ext_canon_offchain_key(block_num: T::BlockNumber) -> sp_std::prelude::Vec<u8> {
+		NodesUtils::node_ext_canon_offchain_key::<<T as frame_system::Config>::Header>(
+			&T::INDEXING_PREFIX,
+			block_num,
+		)
 	}
 
 	/// Provide the parent number for the block that added `leaf_index` to the MMR.

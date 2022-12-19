@@ -24,7 +24,7 @@ pub use mmr_lib;
 
 use scale_info::TypeInfo;
 use sp_debug_derive::RuntimeDebug;
-use sp_runtime::traits;
+use sp_runtime::{traits, traits::CheckedConversion};
 use sp_std::fmt;
 #[cfg(not(feature = "std"))]
 use sp_std::prelude::Vec;
@@ -357,6 +357,34 @@ pub struct Proof<Hash> {
 	pub leaf_count: NodeIndex,
 	/// Proof elements (hashes of siblings of inner nodes on the path to the leaf).
 	pub items: Vec<Hash>,
+}
+
+/// A structure representing the entire subtree generated when adding a leaf in the MMR tree.
+#[derive(codec::Encode, codec::Decode)]
+pub struct MmrLeafSubtree<Node> {
+	first_node_idx: NodeIndex,
+	nodes: Vec<Node>,
+}
+
+impl<Node: Clone> MmrLeafSubtree<Node> {
+	/// Create a new `MmrLeafSubtree`.
+	pub fn new(first_node_idx: NodeIndex) -> Self {
+		Self { first_node_idx, nodes: vec![] }
+	}
+
+	/// Add a node to the `MmrLeafSubtree`.
+	pub fn push(&mut self, node: Node) {
+		self.nodes.push(node);
+	}
+
+	/// Get a node from the `MmrLeafSubtree`.
+	pub fn get(&self, idx: NodeIndex) -> Option<&Node> {
+		let pos = idx
+			.checked_sub(self.first_node_idx)
+			.and_then(|pos| Some(pos.checked_into::<usize>()?))
+			.filter(|pos| *pos <= self.nodes.len())?;
+		self.nodes.get(pos)
+	}
 }
 
 /// Merkle Mountain Range operation error.

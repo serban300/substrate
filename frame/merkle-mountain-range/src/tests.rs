@@ -17,12 +17,13 @@
 
 use crate::{mock::*, *};
 
+use crate::mmr::Node;
 use frame_support::traits::{Get, OnInitialize};
 use sp_core::{
 	offchain::{testing::TestOffchainExt, OffchainDbExt, OffchainWorkerExt},
 	H256,
 };
-use sp_mmr_primitives::{mmr_lib::helper, utils, Compact, Proof};
+use sp_mmr_primitives::{mmr_lib::helper, utils, Compact, MmrLeafSubtree, Proof};
 
 pub(crate) fn new_test_ext() -> sp_io::TestExternalities {
 	frame_system::GenesisConfig::default().build_storage::<Test>().unwrap().into()
@@ -54,22 +55,6 @@ pub(crate) fn hex(s: &str) -> H256 {
 }
 
 type BlockNumber = <Test as frame_system::Config>::BlockNumber;
-
-fn decode_node(
-	v: Vec<u8>,
-) -> mmr::Node<<Test as Config>::Hashing, ((BlockNumber, H256), LeafData)> {
-	use crate::primitives::DataOrHash;
-	type A = DataOrHash<<Test as Config>::Hashing, (BlockNumber, H256)>;
-	type B = DataOrHash<<Test as Config>::Hashing, LeafData>;
-	type Node = mmr::Node<<Test as Config>::Hashing, (A, B)>;
-	let tuple: Node = codec::Decode::decode(&mut &v[..]).unwrap();
-
-	match tuple {
-		mmr::Node::Data((DataOrHash::Data(a), DataOrHash::Data(b))) => mmr::Node::Data((a, b)),
-		mmr::Node::Hash(hash) => mmr::Node::Hash(hash),
-		_ => unreachable!(),
-	}
-}
 
 fn add_blocks(blocks: usize) {
 	// given
@@ -165,25 +150,24 @@ fn should_append_to_mmr_when_on_initialize_is_called() {
 
 	let offchain_db = ext.offchain_db();
 
-	let expected = Some(mmr::Node::Data(((0, H256::repeat_byte(1)), LeafData::new(1))));
-	assert_eq!(
-		offchain_db.get(&MMR::node_temp_offchain_key(0, parent_b1)).map(decode_node),
-		expected
-	);
+	let b1_subtree: MmrLeafSubtree<NodeData> = offchain_db
+		.get(&MMR::node_ext_temp_offchain_key(1, parent_b1))
+		.and_then(|v| codec::Decode::decode(&mut &*v).ok())
+		.unwrap();
+	let expected =
+		Some(Node::Data((Node::Data((0, H256::repeat_byte(1))), Node::Data(LeafData::new(1)))));
+	assert_eq!(b1_subtree.get(0).cloned(), expected);
 
-	let expected = Some(mmr::Node::Data(((1, H256::repeat_byte(2)), LeafData::new(2))));
-	assert_eq!(
-		offchain_db.get(&MMR::node_temp_offchain_key(1, parent_b2)).map(decode_node),
-		expected
-	);
-
-	let expected = Some(mmr::Node::Hash(hex(
-		"672c04a9cd05a644789d769daa552d35d8de7c33129f8a7cbf49e595234c4854",
-	)));
-	assert_eq!(
-		offchain_db.get(&MMR::node_temp_offchain_key(2, parent_b2)).map(decode_node),
-		expected
-	);
+	let b2_subtree: MmrLeafSubtree<NodeData> = offchain_db
+		.get(&MMR::node_ext_temp_offchain_key(2, parent_b2))
+		.and_then(|v| codec::Decode::decode(&mut &*v).ok())
+		.unwrap();
+	let expected =
+		Some(Node::Data((Node::Data((1, H256::repeat_byte(2))), Node::Data(LeafData::new(2)))));
+	assert_eq!(b2_subtree.get(1).cloned(), expected);
+	let expected =
+		Some(Node::Hash(hex("672c04a9cd05a644789d769daa552d35d8de7c33129f8a7cbf49e595234c4854")));
+	assert_eq!(b2_subtree.get(2).cloned(), expected);
 
 	assert_eq!(offchain_db.get(&MMR::node_temp_offchain_key(3, parent_b2)), None);
 }

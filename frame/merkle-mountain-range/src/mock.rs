@@ -18,6 +18,7 @@
 use crate as pallet_mmr;
 use crate::*;
 
+use crate::mmr::Node;
 use codec::{Decode, Encode};
 use frame_support::{
 	parameter_types,
@@ -104,3 +105,5 @@ impl LeafDataProvider for LeafData {
 		LeafDataTestValue::get().clone()
 	}
 }
+
+pub type NodeData = Node<Keccak256, (Node<Keccak256, (u64, H256)>, Node<Keccak256, LeafData>)>;
